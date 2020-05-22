@@ -19,10 +19,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 {
@@ -82,6 +78,9 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 			Console.WriteLine(FirstOrDefault(new List<int> { 1, 2, 3, 4, 5 }));
 			Console.WriteLine(NoForeachDueToMultipleCurrentAccess(new List<int> { 1, 2, 3, 4, 5 }));
 			Console.WriteLine(NoForeachCallWithSideEffect(new CustomClassEnumeratorWithIDisposable<int>()));
+			LoopWithGotoRepeat();
+			Console.WriteLine("LoopFollowedByIf: {0}", LoopFollowedByIf());
+			NoForeachDueToVariableAssignment();
 		}
 
 		public static void ForWithMultipleVariables()
@@ -220,6 +219,76 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Correctness
 					T result = enumerator.Current;
 				}
 				return CallWithSideEffect<T>();
+			}
+		}
+		
+		static bool GetBool(string text)
+		{
+			return false;
+		}
+
+		// https://github.com/icsharpcode/ILSpy/issues/915
+		static void LoopWithGotoRepeat()
+		{
+			Console.WriteLine("LoopWithGotoRepeat:");
+			try {
+				REPEAT:
+				Console.WriteLine("after repeat label");
+				while (GetBool("Loop condition")) {
+					if (GetBool("if1")) {
+						if (GetBool("if3")) {
+							goto REPEAT;
+						}
+						break;
+					}
+				}
+				Console.WriteLine("after loop");
+			} finally {
+				Console.WriteLine("finally");
+			}
+			Console.WriteLine("after finally");
+		}
+		
+		private static int LoopFollowedByIf()
+		{
+			int num = 0;
+			while (num == 0) {
+				num++;
+			}
+			if (num == 0) {
+				return -1;
+			}
+			return num;
+		}
+
+		static void Issue1392ForWithNestedSwitchPlusGoto()
+		{
+			for (int i = 0; i < 100; i++) {
+				again:
+				switch (i) {
+					case 10:
+						Console.WriteLine("10");
+						break;
+					case 25:
+						Console.WriteLine("25");
+						break;
+					case 50:
+						Console.WriteLine("50");
+						goto again;
+				}
+			}
+		}
+
+		private static void NoForeachDueToVariableAssignment()
+		{
+			try {
+				int[] array = new int[] { 1, 2, 3 };
+				for (int i = 0; i < array.Length; i++) {
+					Console.WriteLine(array[i]);
+					array = null;
+				}
+			} catch (Exception ex) {
+				Console.WriteLine(ex.GetType() + ": " + ex.Message);
 			}
 		}
 	}

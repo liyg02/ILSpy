@@ -44,7 +44,7 @@ namespace ICSharpCode.Decompiler.IL
 			get { return list[index]; }
 			set {
 				T oldValue = list[index];
-				if (oldValue != value) {
+				if (!(oldValue == value && value.Parent == parentInstruction && value.ChildIndex == index)) {
 					list[index] = value;
 					value.ChildIndex = index + firstChildIndex;
 					parentInstruction.InstructionCollectionAdded(value);
@@ -140,6 +140,10 @@ namespace ICSharpCode.Decompiler.IL
 		/// </remarks>
 		public int IndexOf(T item)
 		{
+			if (item == null) {
+				// InstructionCollection can't contain nulls
+				return -1;
+			}
 			// If this collection is the item's primary position, we can use ChildIndex:
 			int index = item.ChildIndex - firstChildIndex;
 			if (index >= 0 && index < list.Count && list[index] == item)
@@ -329,7 +333,41 @@ namespace ICSharpCode.Decompiler.IL
 			}
 			return removed;
 		}
-		
+
+		public void MoveElementToIndex(int oldIndex, int newIndex)
+		{
+			parentInstruction.AssertNoEnumerators();
+			var item = list[oldIndex];
+			Insert(newIndex, item);
+			if (oldIndex < newIndex)
+				RemoveAt(oldIndex);
+			else
+				RemoveAt(oldIndex + 1);
+		}
+
+		public void MoveElementToIndex(T item, int newIndex)
+		{
+			parentInstruction.AssertNoEnumerators();
+			int oldIndex = IndexOf(item);
+			if (oldIndex >= 0) {
+				Insert(newIndex, item);
+				if (oldIndex < newIndex)
+					RemoveAt(oldIndex);
+				else
+					RemoveAt(oldIndex + 1);
+			}
+		}
+
+		public void MoveElementToEnd(int index)
+		{
+			MoveElementToIndex(index, list.Count);
+		}
+
+		public void MoveElementToEnd(T item)
+		{
+			MoveElementToIndex(item, list.Count);
+		}
+
 		// more efficient versions of some LINQ methods:
 		public T First()
 		{

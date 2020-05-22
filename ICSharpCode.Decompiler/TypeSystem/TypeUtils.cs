@@ -24,7 +24,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 	public static class TypeUtils
 	{
 		public const int NativeIntSize = 6; // between 4 (Int32) and 8 (Int64)
-		
+
 		/// <summary>
 		/// Gets the size (in bytes) of the input type.
 		/// Returns <c>NativeIntSize</c> for pointer-sized types.
@@ -40,8 +40,11 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				case TypeKind.Enum:
 					type = type.GetEnumUnderlyingType();
 					break;
+				case TypeKind.ModOpt:
+				case TypeKind.ModReq:
+					return type.SkipModifiers().GetSize();
 			}
-			
+
 			var typeDef = type.GetDefinition();
 			if (typeDef == null)
 				return 0;
@@ -68,7 +71,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 			}
 			return 0;
 		}
-		
+
 		/// <summary>
 		/// Gets the size of the input stack type.
 		/// </summary>
@@ -92,12 +95,12 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return 0;
 			}
 		}
-		
+
 		public static IType GetLargerType(IType type1, IType type2)
 		{
 			return GetSize(type1) >= GetSize(type2) ? type1 : type2;
 		}
-		
+
 		/// <summary>
 		/// Gets whether the type is a small integer type.
 		/// Small integer types are:
@@ -106,13 +109,14 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		/// </summary>
 		public static bool IsSmallIntegerType(this IType type)
 		{
-			return GetSize(type) < 4;
+			int size = GetSize(type);
+			return size > 0 && size < 4;
 		}
 
 		/// <summary>
 		/// Gets whether the type is a C# small integer type: byte, sbyte, short or ushort.
 		/// 
-		/// Unlike the ILAst, C# does not consider bool or enums to be small integers.
+		/// Unlike the ILAst, C# does not consider bool, char or enums to be small integers.
 		/// </summary>
 		public static bool IsCSharpSmallIntegerType(this IType type)
 		{
@@ -121,6 +125,28 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				case KnownTypeCode.SByte:
 				case KnownTypeCode.Int16:
 				case KnownTypeCode.UInt16:
+					return true;
+				default:
+					return false;
+			}
+		}
+
+		/// <summary>
+		/// Gets whether the type is a C# primitive integer type: byte, sbyte, short, ushort, int, uint, long and ulong.
+		/// 
+		/// Unlike the ILAst, C# does not consider bool, enums, pointers or IntPtr to be integers.
+		/// </summary>
+		public static bool IsCSharpPrimitiveIntegerType(this IType type)
+		{
+			switch (type.GetDefinition()?.KnownTypeCode) {
+				case KnownTypeCode.Byte:
+				case KnownTypeCode.SByte:
+				case KnownTypeCode.Int16:
+				case KnownTypeCode.UInt16:
+				case KnownTypeCode.Int32:
+				case KnownTypeCode.UInt32:
+				case KnownTypeCode.Int64:
+				case KnownTypeCode.UInt64:
 					return true;
 				default:
 					return false;
@@ -142,7 +168,22 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return false;
 			}
 		}
-		
+
+		/// <summary>
+		/// Gets whether the type is an IL floating point type.
+		/// Returns true for F4 or F8.
+		/// </summary>
+		public static bool IsFloatType(this StackType type)
+		{
+			switch (type) {
+				case StackType.F4:
+				case StackType.F8:
+					return true;
+				default:
+					return false;
+			}
+		}
+
 		/// <summary>
 		/// Gets whether reading/writing an element of accessType from the pointer
 		/// is equivalent to reading/writing an element of the pointer's element type.
@@ -151,13 +192,28 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		/// The access semantics may sligthly differ on read accesses of small integer types,
 		/// due to zero extension vs. sign extension when the signs differ.
 		/// </remarks>
-		public static bool IsCompatibleTypeForMemoryAccess(IType pointerType, IType accessType)
+		public static bool IsCompatiblePointerTypeForMemoryAccess(IType pointerType, IType accessType)
 		{
 			IType memoryType;
 			if (pointerType is PointerType || pointerType is ByReferenceType)
 				memoryType = ((TypeWithElementType)pointerType).ElementType;
 			else
 				return false;
+			return IsCompatibleTypeForMemoryAccess(memoryType, accessType);
+		}
+
+		/// <summary>
+		/// Gets whether reading/writing an element of accessType from the pointer
+		/// is equivalent to reading/writing an element of the memoryType.
+		/// </summary>
+		/// <remarks>
+		/// The access semantics may sligthly differ on read accesses of small integer types,
+		/// due to zero extension vs. sign extension when the signs differ.
+		/// </remarks>
+		public static bool IsCompatibleTypeForMemoryAccess(IType memoryType, IType accessType)
+		{
+			memoryType = memoryType.AcceptVisitor(NormalizeTypeVisitor.TypeErasure);
+			accessType = accessType.AcceptVisitor(NormalizeTypeVisitor.TypeErasure);
 			if (memoryType.Equals(accessType))
 				return true;
 			// If the types are not equal, the access still might produce equal results in some cases:
@@ -167,7 +223,10 @@ namespace ICSharpCode.Decompiler.TypeSystem
 			// 2) Both types are integer types of equal size
 			StackType memoryStackType = memoryType.GetStackType();
 			StackType accessStackType = accessType.GetStackType();
-			return memoryStackType == accessStackType && memoryStackType.IsIntegerType() && GetSize(memoryType) == GetSize(accessType);
+			if (memoryStackType == accessStackType && memoryStackType.IsIntegerType() && GetSize(memoryType) == GetSize(accessType))
+				return true;
+			// 3) Any of the types is unknown: we assume they are compatible.
+			return memoryType.Kind == TypeKind.Unknown || accessType.Kind == TypeKind.Unknown;
 		}
 
 		/// <summary>
@@ -177,11 +236,21 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		{
 			switch (type.Kind) {
 				case TypeKind.Unknown:
+					if (type.IsReferenceType == true) {
+						return StackType.O;
+					}
 					return StackType.Unknown;
 				case TypeKind.ByReference:
 					return StackType.Ref;
 				case TypeKind.Pointer:
 					return StackType.I;
+				case TypeKind.TypeParameter:
+					// Type parameters are always considered StackType.O, even
+					// though they might be instantiated with primitive types.
+					return StackType.O;
+				case TypeKind.ModOpt:
+				case TypeKind.ModReq:
+					return type.SkipModifiers().GetStackType();
 			}
 			ITypeDefinition typeDef = type.GetEnumUnderlyingType().GetDefinition();
 			if (typeDef == null)
@@ -200,8 +269,9 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				case KnownTypeCode.UInt64:
 					return StackType.I8;
 				case KnownTypeCode.Single:
+					return StackType.F4;
 				case KnownTypeCode.Double:
-					return StackType.F;
+					return StackType.F8;
 				case KnownTypeCode.Void:
 					return StackType.Void;
 				case KnownTypeCode.IntPtr:
@@ -211,16 +281,17 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return StackType.O;
 			}
 		}
-		
+
 		/// <summary>
 		/// If type is an enumeration type, returns the underlying type.
 		/// Otherwise, returns type unmodified.
 		/// </summary>
 		public static IType GetEnumUnderlyingType(this IType type)
 		{
+			type = type.SkipModifiers();
 			return (type.Kind == TypeKind.Enum) ? type.GetDefinition().EnumUnderlyingType : type;
 		}
-		
+
 		/// <summary>
 		/// Gets the sign of the input type.
 		/// </summary>
@@ -233,6 +304,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		/// </remarks>
 		public static Sign GetSign(this IType type)
 		{
+			type = type.SkipModifiers();
 			if (type.Kind == TypeKind.Pointer)
 				return Sign.Unsigned;
 			var typeDef = type.GetEnumUnderlyingType().GetDefinition();
@@ -282,6 +354,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				case KnownTypeCode.Byte:
 					return PrimitiveType.U1;
 				case KnownTypeCode.UInt16:
+				case KnownTypeCode.Char:
 					return PrimitiveType.U2;
 				case KnownTypeCode.UInt32:
 					return PrimitiveType.U4;
@@ -301,6 +374,9 @@ namespace ICSharpCode.Decompiler.TypeSystem
 		/// </summary>
 		public static PrimitiveType ToPrimitiveType(this IType type)
 		{
+			type = type.SkipModifiers();
+			if (type.Kind == TypeKind.Unknown) return PrimitiveType.Unknown;
+			if (type.Kind == TypeKind.ByReference) return PrimitiveType.Ref;
 			var def = type.GetEnumUnderlyingType().GetDefinition();
 			return def != null ? def.KnownTypeCode.ToPrimitiveType() : PrimitiveType.None;
 		}
@@ -322,6 +398,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 				case PrimitiveType.R4:
 					return KnownTypeCode.Single;
 				case PrimitiveType.R8:
+				case PrimitiveType.R:
 					return KnownTypeCode.Double;
 				case PrimitiveType.U1:
 					return KnownTypeCode.Byte;
@@ -339,7 +416,7 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return KnownTypeCode.None;
 			}
 		}
-		
+
 		public static KnownTypeCode ToKnownTypeCode(this StackType stackType, Sign sign = Sign.None)
 		{
 			switch (stackType) {
@@ -349,7 +426,9 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return sign == Sign.Unsigned ? KnownTypeCode.UInt64 : KnownTypeCode.Int64;
 				case StackType.I:
 					return sign == Sign.Unsigned ? KnownTypeCode.UIntPtr : KnownTypeCode.IntPtr;
-				case StackType.F:
+				case StackType.F4:
+					return KnownTypeCode.Single;
+				case StackType.F8:
 					return KnownTypeCode.Double;
 				case StackType.O:
 					return KnownTypeCode.Object;
@@ -359,8 +438,30 @@ namespace ICSharpCode.Decompiler.TypeSystem
 					return KnownTypeCode.None;
 			}
 		}
+
+		public static PrimitiveType ToPrimitiveType(this StackType stackType, Sign sign = Sign.None)
+		{
+			switch (stackType) {
+				case StackType.I4:
+					return sign == Sign.Unsigned ? PrimitiveType.U4 : PrimitiveType.I4;
+				case StackType.I8:
+					return sign == Sign.Unsigned ? PrimitiveType.U8 : PrimitiveType.I8;
+				case StackType.I:
+					return sign == Sign.Unsigned ? PrimitiveType.U : PrimitiveType.I;
+				case StackType.F4:
+					return PrimitiveType.R4;
+				case StackType.F8:
+					return PrimitiveType.R8;
+				case StackType.Ref:
+					return PrimitiveType.Ref;
+				case StackType.Unknown:
+					return PrimitiveType.Unknown;
+				default:
+					return PrimitiveType.None;
+			}
+		}
 	}
-	
+
 	public enum Sign : byte
 	{
 		None,

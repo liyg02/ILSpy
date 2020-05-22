@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.IO;
 
 namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 {
@@ -25,40 +26,66 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		private int field1;
 		private static InlineAssignmentTest field2;
 		private int[] field3;
-		
+		private short field4;
+
+		public int InstanceProperty {
+			get;
+			set;
+		}
+
+		public static int StaticProperty {
+			get;
+			set;
+		}
+
+		public bool BoolProperty {
+			get;
+			set;
+		}
+
 		public void SimpleInlineWithLocals()
 		{
-			int value;
-			Console.WriteLine(value = 5);
+			int index;
+			Console.WriteLine(GetFormat(), index = GetIndex());
+			Console.WriteLine(index);
+			InlineAssignmentTest value;
+			Console.WriteLine(GetFormat(), value = new InlineAssignmentTest());
 			Console.WriteLine(value);
-			InlineAssignmentTest value2;
-			Console.WriteLine(value2 = new InlineAssignmentTest());
-			Console.WriteLine(value2);
 		}
 		
 		public void SimpleInlineWithFields()
 		{
-			Console.WriteLine(this.field1 = 5);
-			Console.WriteLine(InlineAssignmentTest.field2 = new InlineAssignmentTest());
+			Console.WriteLine(field1 = 5);
+			Console.WriteLine(field2 = new InlineAssignmentTest());
 		}
-		
+
 		public void SimpleInlineWithFields2()
 		{
-			Console.WriteLine(this.field1 = 5);
-			Console.WriteLine(this.field1);
-			Console.WriteLine(InlineAssignmentTest.field2 = new InlineAssignmentTest());
-			Console.WriteLine(InlineAssignmentTest.field2);
+			Console.WriteLine(field1 = 5);
+			Console.WriteLine(field1);
+			Console.WriteLine(field2 = new InlineAssignmentTest());
+			Console.WriteLine(field2);
+			UseShort(field4 = 6);
+			UseShort(field4 = -10000);
+			UseShort(field4 = (short)field1);
+			UseShort(field4 = UseShort(0));
+			Console.WriteLine(field4);
 		}
 		
-//		public void ReadLoop1(TextReader r)
-//		{
-//			string V_0;
-//			while ((V_0 = r.ReadLine()) != null)
-//			{
-//				Console.WriteLine(V_0);
-//			}
-//		}
-		
+		public short UseShort(short s)
+		{
+			Console.WriteLine(s);
+			return s;
+		}
+
+		public void ReadLoop1(TextReader r)
+		{
+			string value;
+			while ((value = r.ReadLine()) != null) {
+				Console.WriteLine(value);
+			}
+		}
+
 		public void AccessArray(int[] a)
 		{
 			int num;
@@ -78,7 +105,7 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		
 		public int Array2(int i)
 		{
-			return this.field3[i] = 1;
+			return field3[i] = 1;
 		}
 		
 		public int GetIndex()
@@ -91,6 +118,11 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			throw new NotImplementedException();
 		}
 		
+		public string GetFormat()
+		{
+			return "{0}";
+		}
+
 		public int GetValue(int value)
 		{
 			return value;
@@ -98,7 +130,22 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		
 		public int ArrayUsageWithMethods()
 		{
-			return this.GetArray()[this.GetIndex()] = this.GetValue(this.GetIndex());
+			return GetArray()[GetIndex()] = GetValue(GetIndex());
+		}
+
+		public int StaticPropertyTest()
+		{
+			return StaticProperty = GetIndex();
+		}
+
+		public int InstancePropertyTest()
+		{
+			return InstanceProperty = GetIndex();
+		}
+
+		public bool BoolPropertyTest(object x)
+		{
+			return BoolProperty = (x != null);
 		}
 	}
 }

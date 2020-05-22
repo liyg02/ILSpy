@@ -16,20 +16,23 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+using System.Linq;
 using ICSharpCode.Decompiler.CSharp.Syntax;
+using ICSharpCode.Decompiler.Semantics;
 using ICSharpCode.Decompiler.TypeSystem;
 
 namespace ICSharpCode.Decompiler.CSharp.Transforms
 {
 	public class IntroduceUnsafeModifier : DepthFirstAstVisitor<bool>, IAstTransform
 	{
-		public static readonly object PointerArithmeticAnnotation = new PointerArithmetic();
-		
-		sealed class PointerArithmetic {}
-		
 		public void Run(AstNode compilationUnit, TransformContext context)
 		{
 			compilationUnit.AcceptVisitor(this);
+		}
+
+		public static bool IsUnsafe(AstNode node)
+		{
+			return node.AcceptVisitor(new IntroduceUnsafeModifier());
 		}
 		
 		protected override bool VisitChildren(AstNode node)
@@ -54,7 +57,15 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			base.VisitPointerReferenceExpression(pointerReferenceExpression);
 			return true;
 		}
-		
+
+		public override bool VisitSizeOfExpression(SizeOfExpression sizeOfExpression)
+		{
+			// C# sizeof(MyStruct) requires unsafe{}
+			// (not for sizeof(int), but that gets constant-folded and thus decompiled to 4)
+			base.VisitSizeOfExpression(sizeOfExpression);
+			return true;
+		}
+
 		public override bool VisitComposedType(ComposedType composedType)
 		{
 			if (composedType.PointerRank > 0)
@@ -67,8 +78,11 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 		{
 			bool result = base.VisitUnaryOperatorExpression(unaryOperatorExpression);
 			if (unaryOperatorExpression.Operator == UnaryOperatorType.Dereference) {
-				BinaryOperatorExpression bop = unaryOperatorExpression.Expression as BinaryOperatorExpression;
-				if (bop != null && bop.Operator == BinaryOperatorType.Add && bop.Annotation<PointerArithmetic>() != null) {
+				var bop = unaryOperatorExpression.Expression as BinaryOperatorExpression;
+				if (bop != null && bop.Operator == BinaryOperatorType.Add 
+					&& bop.GetResolveResult() is OperatorResolveResult orr
+					&& orr.Operands.FirstOrDefault()?.Type.Kind == TypeKind.Pointer)
+				{
 					// transform "*(ptr + int)" to "ptr[int]"
 					IndexerExpression indexer = new IndexerExpression();
 					indexer.Target = bop.Left.Detach();
@@ -95,19 +109,48 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				pre.MemberName = memberReferenceExpression.MemberName;
 				memberReferenceExpression.TypeArguments.MoveTo(pre.TypeArguments);
 				pre.CopyAnnotationsFrom(uoe);
+				pre.RemoveAnnotations<ResolveResult>(); // only copy the ResolveResult from the MRE
 				pre.CopyAnnotationsFrom(memberReferenceExpression);
 				memberReferenceExpression.ReplaceWith(pre);
 			}
 			var rr = memberReferenceExpression.GetResolveResult();
-			if (rr != null && rr.Type is PointerType)
-				return true;
+			if (rr != null) {
+				if (rr.Type is PointerType)
+					return true;
+				if (rr is MemberResolveResult mrr && mrr.Member.ReturnType.Kind == TypeKind.Delegate) {
+					var method = mrr.Member.ReturnType.GetDefinition()?.GetDelegateInvokeMethod();
+					if (method != null && (method.ReturnType is PointerType || method.Parameters.Any(p => p.Type is PointerType)))
+						return true;
+				}
+			}
+
 			return result;
 		}
-		
+
+		public override bool VisitIdentifierExpression(IdentifierExpression identifierExpression)
+		{
+			bool result = base.VisitIdentifierExpression(identifierExpression);
+			var rr = identifierExpression.GetResolveResult();
+			if (rr != null) {
+				if (rr.Type is PointerType)
+					return true;
+				if (rr is MemberResolveResult mrr && mrr.Member.ReturnType.Kind == TypeKind.Delegate) {
+					var method = mrr.Member.ReturnType.GetDefinition()?.GetDelegateInvokeMethod();
+					if (method != null && (method.ReturnType is PointerType || method.Parameters.Any(p => p.Type is PointerType)))
+						return true;
+				}
+			}
+
+			return result;
+		}
+
 		public override bool VisitStackAllocExpression(StackAllocExpression stackAllocExpression)
 		{
-			base.VisitStackAllocExpression(stackAllocExpression);
-			return true;
+			bool result = base.VisitStackAllocExpression(stackAllocExpression);
+			var rr = stackAllocExpression.GetResolveResult();
+			if (rr?.Type is PointerType)
+				return true;
+			return result;
 		}
 		
 		public override bool VisitInvocationExpression(InvocationExpression invocationExpression)
@@ -117,6 +160,12 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			if (rr != null && rr.Type is PointerType)
 				return true;
 			return result;
+		}
+
+		public override bool VisitFixedVariableInitializer(FixedVariableInitializer fixedVariableInitializer)
+		{
+			base.VisitFixedVariableInitializer(fixedVariableInitializer);
+			return true;
 		}
 	}
 }

@@ -19,12 +19,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Reflection;
 using Humanizer;
-using ICSharpCode.Decompiler.IL;
-using ICSharpCode.Decompiler.Semantics;
+using ICSharpCode.Decompiler.CSharp.OutputVisitor;
 using ICSharpCode.Decompiler.TypeSystem;
+using ICSharpCode.Decompiler.TypeSystem.Implementation;
 using ICSharpCode.Decompiler.Util;
 
 namespace ICSharpCode.Decompiler.IL.Transforms
@@ -58,13 +57,78 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 		public void Run(ILFunction function, ILTransformContext context)
 		{
 			this.context = context;
-			currentFieldNames = function.CecilMethod.DeclaringType.Fields.Select(f => f.Name).ToArray();
+			currentFieldNames = function.Method.DeclaringTypeDefinition.Fields.Select(f => f.Name).ToArray();
 			reservedVariableNames = new Dictionary<string, int>();
 			loopCounters = CollectLoopCounters(function);
-			foreach (var p in function.Descendants.OfType<ILFunction>().Select(f => f.Method).SelectMany(m => m.Parameters))
-				AddExistingName(reservedVariableNames, p.Name);
+			foreach (var f in function.Descendants.OfType<ILFunction>()) {
+				if (f.Method != null) {
+					if (IsSetOrEventAccessor(f.Method) && f.Method.Parameters.Count > 0) {
+						for (int i = 0; i < f.Method.Parameters.Count - 1; i++) {
+							AddExistingName(reservedVariableNames, f.Method.Parameters[i].Name);
+						}
+						var lastParameter = f.Method.Parameters.Last();
+						switch (f.Method.AccessorOwner) {
+							case IProperty prop:
+								if (f.Method.AccessorKind == MethodSemanticsAttributes.Setter) {
+									if (prop.Parameters.Any(p => p.Name == "value")) {
+										f.Warnings.Add("Parameter named \"value\" already present in property signature!");
+										break;
+									}
+									var variableForLastParameter = f.Variables.FirstOrDefault(v => v.Function == f
+										&& v.Kind == VariableKind.Parameter
+										&& v.Index == f.Method.Parameters.Count - 1);
+									if (variableForLastParameter == null) {
+										AddExistingName(reservedVariableNames, lastParameter.Name);
+									} else {
+										if (variableForLastParameter.Name != "value") {
+											variableForLastParameter.Name = "value";
+										}
+										AddExistingName(reservedVariableNames, variableForLastParameter.Name);
+									}
+								}
+								break;
+							case IEvent ev:
+								if (f.Method.AccessorKind != MethodSemanticsAttributes.Raiser) {
+									var variableForLastParameter = f.Variables.FirstOrDefault(v => v.Function == f
+										&& v.Kind == VariableKind.Parameter
+										&& v.Index == f.Method.Parameters.Count - 1);
+									if (variableForLastParameter == null) {
+										AddExistingName(reservedVariableNames, lastParameter.Name);
+									} else {
+										if (variableForLastParameter.Name != "value") {
+											variableForLastParameter.Name = "value";
+										}
+										AddExistingName(reservedVariableNames, variableForLastParameter.Name);
+									}
+								}
+								break;
+							default:
+								AddExistingName(reservedVariableNames, lastParameter.Name);
+								break;
+						}
+					} else {
+						foreach (var p in f.Method.Parameters)
+							AddExistingName(reservedVariableNames, p.Name);
+					}
+				} else {
+					foreach (var p in f.Variables.Where(v => v.Kind == VariableKind.Parameter))
+						AddExistingName(reservedVariableNames, p.Name);
+				}
+			}
 			foreach (ILFunction f in function.Descendants.OfType<ILFunction>().Reverse()) {
 				PerformAssignment(f);
+			}
+		}
+
+		bool IsSetOrEventAccessor(IMethod method)
+		{
+			switch (method.AccessorKind) {
+				case MethodSemanticsAttributes.Setter:
+				case MethodSemanticsAttributes.Adder:
+				case MethodSemanticsAttributes.Remover:
+					return true;
+				default:
+					return false;
 			}
 		}
 
@@ -72,24 +136,50 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 		{
 			// remove unused variables before assigning names
 			function.Variables.RemoveDead();
-			foreach (var v in function.Variables) {
+			int numDisplayClassLocals = 0;
+			Dictionary<int, string> assignedLocalSignatureIndices = new Dictionary<int, string>();
+			foreach (var v in function.Variables.OrderBy(v => v.Name)) {
 				switch (v.Kind) {
 					case VariableKind.Parameter: // ignore
 						break;
 					case VariableKind.InitializerTarget: // keep generated names
 						AddExistingName(reservedVariableNames, v.Name);
 						break;
-					default:
-						if (v.HasGeneratedName || !IsValidName(v.Name) || ConflictWithLocal(v)) {
-							// don't use the name from the debug symbols if it looks like a generated name
-							v.Name = null;
+					case VariableKind.DisplayClassLocal:
+						v.Name = "CS$<>8__locals" + (numDisplayClassLocals++);
+						break;
+					case VariableKind.Local when v.Index != null:
+						if (assignedLocalSignatureIndices.TryGetValue(v.Index.Value, out string name)) {
+							// make sure all local ILVariables that refer to the same slot in the locals signature
+							// are assigned the same name.
+							v.Name = name;
 						} else {
-							// use the name from the debug symbols
-							// (but ensure we don't use the same name for two variables)
-							v.Name = GetAlternativeName(v.Name);
+							AssignName();
+							// Remember the newly assigned name:
+							assignedLocalSignatureIndices.Add(v.Index.Value, v.Name);
 						}
 						break;
+					default:
+						AssignName();
+						break;
 				}
+
+				void AssignName()
+				{
+					if (v.HasGeneratedName || !IsValidName(v.Name) || ConflictWithLocal(v)) {
+						// don't use the name from the debug symbols if it looks like a generated name
+						v.Name = null;
+					} else {
+						// use the name from the debug symbols
+						// (but ensure we don't use the same name for two variables)
+						v.Name = GetAlternativeName(v.Name);
+					}
+				}
+			}
+			foreach (var localFunction in function.LocalFunctions) {
+				if (!LocalFunctionDecompiler.ParseLocalFunctionName(localFunction.Name, out _, out var newName) || !IsValidName(newName))
+					newName = null;
+				localFunction.Name = newName;
 			}
 			// Now generate names:
 			var mapping = new Dictionary<ILVariable, string>(ILVariableEqualityComparer.Instance);
@@ -102,6 +192,29 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 				} else {
 					v.Name = name;
 				}
+			}
+			foreach (var localFunction in function.LocalFunctions) {
+				var newName = localFunction.Name;
+				if (newName == null) {
+					newName = GetAlternativeName("f");
+				}
+				localFunction.Name = newName;
+			}
+		}
+
+		/// <remarks>
+		/// Must be in sync with <see cref="GetNameFromInstruction" />.
+		/// </remarks>
+		internal static bool IsSupportedInstruction(object arg)
+		{
+			switch (arg) {
+				case LdObj ldobj:
+				case LdFlda ldflda:
+				case LdsFlda ldsflda:
+				case CallInstruction call:
+					return true;
+				default:
+					return false;
 			}
 		}
 
@@ -144,8 +257,12 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 				reservedVariableNames.Add(nameWithoutDigits, number - 1);
 			}
 			int count = ++reservedVariableNames[nameWithoutDigits];
+			string nameWithDigits = nameWithoutDigits + count.ToString();
+			if (oldVariableName == nameWithDigits) {
+				return oldVariableName;
+			}
 			if (count != 1) {
-				return nameWithoutDigits + count.ToString();
+				return nameWithDigits;
 			} else {
 				return nameWithoutDigits;
 			}
@@ -156,10 +273,11 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 			var loopCounters = new HashSet<ILVariable>();
 			
 			foreach (BlockContainer possibleLoop in function.Descendants.OfType<BlockContainer>()) {
-				if (possibleLoop.EntryPoint.IncomingEdgeCount == 1) continue;
-				var loop = DetectedLoop.DetectLoop(possibleLoop);
-				if (loop.Kind != LoopKind.For || loop.IncrementTarget == null) continue;
-				loopCounters.Add(loop.IncrementTarget);
+				if (possibleLoop.Kind != ContainerKind.For) continue;
+				foreach (var inst in possibleLoop.Blocks.Last().Instructions) {
+					if (HighLevelLoopTransform.MatchIncrement(inst, out var variable))
+						loopCounters.Add(variable);
+				}
 			}
 
 			return loopCounters;
@@ -178,6 +296,20 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 							break;
 						}
 					}
+				}
+			}
+			// The ComponentResourceManager inside InitializeComponent must be named "resources",
+			// otherwise the WinForms designer won't load the Form.
+			if (CSharp.CSharpDecompiler.IsWindowsFormsInitializeComponentMethod(context.Function.Method) && variable.Type.FullName == "System.ComponentModel.ComponentResourceManager") {
+				proposedName = "resources";
+			}
+			if (string.IsNullOrEmpty(proposedName)) {
+				var proposedNameForAddress = variable.AddressInstructions.OfType<LdLoca>()
+					.Select(arg => arg.Parent is CallInstruction c ? c.GetParameter(arg.ChildIndex)?.Name : null)
+					.Where(arg => !string.IsNullOrWhiteSpace(arg))
+					.Except(currentFieldNames).ToList();
+				if (proposedNameForAddress.Count > 0) {
+					proposedName = proposedNameForAddress[0];
 				}
 			}
 			if (string.IsNullOrEmpty(proposedName)) {
@@ -226,14 +358,11 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 		{
 			switch (inst) {
 				case LdObj ldobj:
-					IField field;
-					if (ldobj.Target is LdFlda ldflda)
-						field = ldflda.Field;
-					else if (ldobj.Target is LdsFlda ldsflda)
-						field = ldsflda.Field;
-					else
-						break;
-					return CleanUpVariableName(field.Name);
+					return GetNameFromInstruction(ldobj.Target);
+				case LdFlda ldflda:
+					return CleanUpVariableName(ldflda.Field.Name);
+				case LdsFlda ldsflda:
+					return CleanUpVariableName(ldsflda.Field.Name);
 				case CallInstruction call:
 					if (call is NewObj) break;
 					IMethod m = call.Method;
@@ -271,7 +400,7 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 							return CleanUpVariableName(m.Name.Substring(3));
 						}
 					}
-					var p = m.Parameters.ElementAtOrDefault((!(call is NewObj) && !m.IsStatic) ? i - 1 : i);
+					var p = call.GetParameter(i);
 					if (p != null && !string.IsNullOrEmpty(p.Name))
 						return CleanUpVariableName(p.Name);
 					break;
@@ -283,9 +412,9 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 
 		static string GetNameByType(IType type)
 		{
-			var git = type as ParameterizedType;
-			if (git != null && git.FullName == "System.Nullable`1" && git.TypeArguments.Count == 1) {
-				type = git.TypeArguments[0];
+			type = NullableType.GetUnderlyingType(type);
+			while (type is ModifiedType || type is PinnedType) {
+				type = NullableType.GetUnderlyingType(((TypeWithElementType)type).ElementType);
 			}
 
 			string name;
@@ -293,7 +422,7 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 				name = "array";
 			} else if (type is PointerType) {
 				name = "ptr";
-			} else if (type.Kind == TypeKind.TypeParameter || type.Kind == TypeKind.Unknown) {
+			} else if (type.Kind == TypeKind.TypeParameter || type.Kind == TypeKind.Unknown || type.Kind == TypeKind.Dynamic) {
 				name = "val";
 			} else if (type.Kind == TypeKind.ByReference) {
 				name = "reference";
@@ -306,7 +435,7 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 				// remove the 'I' for interfaces
 				if (name.Length >= 3 && name[0] == 'I' && char.IsUpper(name[1]) && char.IsLower(name[2]))
 					name = name.Substring(1);
-				name = CleanUpVariableName(name);
+				name = CleanUpVariableName(name) ?? "obj";
 			}
 			return name;
 		}
@@ -351,6 +480,10 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 			else if (name.Length > 1 && name[0] == '_' && (char.IsLetter(name[1]) || name[1] == '_'))
 				name = name.Substring(1);
 
+			if (TextWriterTokenWriter.ContainsNonPrintableIdentifierChar(name)) {
+				return null;
+			}
+
 			if (name.Length == 0)
 				return "obj";
 			else
@@ -362,31 +495,39 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 			if (!variableType.IsKnownType(KnownTypeCode.Object))
 				return variableType;
 
-			switch (inst) {
-				case NewObj newObj:
-					return newObj.Method.DeclaringType;
-				case Call call:
-					return call.Method.ReturnType;
-				case CallVirt callVirt:
-					return callVirt.Method.ReturnType;
-				case CallIndirect calli:
-					return calli.ReturnType;
-				default:
-					return context.TypeSystem.Compilation.FindType(inst.ResultType.ToKnownTypeCode());
+			IType inferredType = inst.InferType(context.TypeSystem);
+			if (inferredType.Kind != TypeKind.Unknown)
+				return inferredType;
+			else
+				return variableType;
+		}
+
+		static Dictionary<string, int> CollectReservedVariableNames(ILFunction function, ILVariable existingVariable)
+		{
+			var reservedVariableNames = new Dictionary<string, int>();
+			var rootFunction = function.Ancestors.OfType<ILFunction>().Single(f => f.Parent == null);
+			foreach (var f in rootFunction.Descendants.OfType<ILFunction>()) {
+				foreach (var p in rootFunction.Parameters) {
+					AddExistingName(reservedVariableNames, p.Name);
+				}
+				foreach (var v in f.Variables.Where(v => v.Kind != VariableKind.Parameter)) {
+					if (v != existingVariable)
+						AddExistingName(reservedVariableNames, v.Name);
+				}
 			}
+			foreach (var f in rootFunction.Method.DeclaringTypeDefinition.GetFields().Select(f => f.Name))
+				AddExistingName(reservedVariableNames, f);
+			return reservedVariableNames;
 		}
 
 		internal static string GenerateForeachVariableName(ILFunction function, ILInstruction valueContext, ILVariable existingVariable = null)
 		{
 			if (function == null)
 				throw new ArgumentNullException(nameof(function));
-			var reservedVariableNames = new Dictionary<string, int>();
-			foreach (var v in function.Descendants.OfType<ILFunction>().SelectMany(m => m.Variables)) {
-				if (v != existingVariable)
-					AddExistingName(reservedVariableNames, v.Name);
+			if (existingVariable != null && !existingVariable.HasGeneratedName) {
+				return existingVariable.Name;
 			}
-			foreach (var f in function.CecilMethod.DeclaringType.Fields.Select(f => f.Name))
-				AddExistingName(reservedVariableNames, f);
+			var reservedVariableNames = CollectReservedVariableNames(function, existingVariable);
 
 			string baseName = GetNameFromInstruction(valueContext);
 			if (string.IsNullOrEmpty(baseName)) {
@@ -422,19 +563,13 @@ namespace ICSharpCode.Decompiler.IL.Transforms
 			}
 		}
 
-		internal static string GenerateVariableName(ILFunction function, IType type, ILVariable existingVariable = null)
+		internal static string GenerateVariableName(ILFunction function, IType type, ILInstruction valueContext = null, ILVariable existingVariable = null)
 		{
 			if (function == null)
 				throw new ArgumentNullException(nameof(function));
-			var reservedVariableNames = new Dictionary<string, int>();
-			foreach (var v in function.Descendants.OfType<ILFunction>().SelectMany(m => m.Variables)) {
-				if (v != existingVariable)
-					AddExistingName(reservedVariableNames, v.Name);
-			}
-			foreach (var f in function.CecilMethod.DeclaringType.Fields.Select(f => f.Name))
-				AddExistingName(reservedVariableNames, f);
+			var reservedVariableNames = CollectReservedVariableNames(function, existingVariable);
 
-			string baseName = GetNameByType(type);
+			string baseName = valueContext != null ? GetNameFromInstruction(valueContext) ?? GetNameByType(type) : GetNameByType(type);
 			string proposedName = "obj";
 
 			if (!string.IsNullOrEmpty(baseName)) {

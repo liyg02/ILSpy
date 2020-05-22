@@ -48,7 +48,7 @@ namespace ICSharpCode.Decompiler.IL
 		/// <summary>
 		/// Converts from the current precision available on the evaluation stack to the precision specified by
 		/// the <c>TargetType</c>.
-		/// Uses "round-to-nearest" mode is the precision is reduced.
+		/// Uses "round-to-nearest" mode if the precision is reduced.
 		/// </summary>
 		FloatPrecisionChange,
 		/// <summary>
@@ -75,7 +75,19 @@ namespace ICSharpCode.Decompiler.IL
 		/// <summary>
 		/// Used to convert managed references/objects to unmanaged pointers.
 		/// </summary>
-		StopGCTracking
+		StopGCTracking,
+		/// <summary>
+		/// Used to convert unmanaged pointers to managed references.
+		/// </summary>
+		StartGCTracking,
+		/// <summary>
+		/// Converts from an object reference (O) to an interior pointer (Ref) pointing to the start of the object.
+		/// </summary>
+		/// <remarks>
+		/// C++/CLI emits "ldarg.1; stloc.0" where arg1 is a string and loc0 is "ref byte" (e.g. as part of the PtrToStringChars codegen);
+		/// we represent this type conversion explicitly in the ILAst.
+		/// </remarks>
+		ObjectInterior
 	}
 	
 	partial class Conv : UnaryInstruction, ILiftableInstruction
@@ -131,6 +143,8 @@ namespace ICSharpCode.Decompiler.IL
 		/// </summary>
 		/// <remarks>
 		/// For lifted conversions, corresponds to the underlying target type.
+		/// 
+		/// Target type == PrimitiveType.None can happen for implicit conversions to O in invalid IL.
 		/// </remarks>
 		public readonly PrimitiveType TargetType;
 		
@@ -142,21 +156,21 @@ namespace ICSharpCode.Decompiler.IL
 		public Conv(ILInstruction argument, StackType inputType, Sign inputSign, PrimitiveType targetType, bool checkForOverflow, bool isLifted = false)
 			: base(OpCode.Conv, argument)
 		{
-			bool needsSign = checkForOverflow || targetType == PrimitiveType.R4 || targetType == PrimitiveType.R8;
+			bool needsSign = checkForOverflow || (!inputType.IsFloatType() && targetType.IsFloatType());
 			Debug.Assert(!(needsSign && inputSign == Sign.None));
-			this.InputType = inputType;
 			this.InputSign = needsSign ? inputSign : Sign.None;
+			this.InputType = inputType;
 			this.TargetType = targetType;
 			this.CheckForOverflow = checkForOverflow;
 			this.Kind = GetConversionKind(targetType, this.InputType, this.InputSign);
-			Debug.Assert(Kind != ConversionKind.Invalid);
+			// Debug.Assert(Kind != ConversionKind.Invalid); // invalid conversion can happen with invalid IL/missing references
 			this.IsLifted = isLifted;
 		}
 
 		internal override void CheckInvariant(ILPhase phase)
 		{
 			base.CheckInvariant(phase);
-			Debug.Assert(Kind != ConversionKind.Invalid);
+			// Debug.Assert(Kind != ConversionKind.Invalid); // invalid conversion can happen with invalid IL/missing references
 			Debug.Assert(Argument.ResultType == (IsLifted ? StackType.O : InputType));
 			Debug.Assert(!(IsLifted && Kind == ConversionKind.StopGCTracking));
 		}
@@ -176,7 +190,8 @@ namespace ICSharpCode.Decompiler.IL
 						case StackType.I8:
 						case StackType.I:
 							return ConversionKind.Truncate;
-						case StackType.F:
+						case StackType.F4:
+						case StackType.F8:
 							return ConversionKind.FloatToInt;
 						default:
 							return ConversionKind.Invalid;
@@ -189,7 +204,8 @@ namespace ICSharpCode.Decompiler.IL
 						case StackType.I:
 						case StackType.I8:
 							return ConversionKind.Truncate;
-						case StackType.F:
+						case StackType.F4:
+						case StackType.F8:
 							return ConversionKind.FloatToInt;
 						default:
 							return ConversionKind.Invalid;
@@ -205,7 +221,8 @@ namespace ICSharpCode.Decompiler.IL
 								return inputSign == Sign.Signed ? ConversionKind.SignExtend : ConversionKind.ZeroExtend;
 						case StackType.I8:
 							return ConversionKind.Nop;
-						case StackType.F:
+						case StackType.F4:
+						case StackType.F8:
 							return ConversionKind.FloatToInt;
 						case StackType.Ref:
 						case StackType.O:
@@ -225,7 +242,8 @@ namespace ICSharpCode.Decompiler.IL
 							return ConversionKind.Nop;
 						case StackType.I8:
 							return ConversionKind.Truncate;
-						case StackType.F:
+						case StackType.F4:
+						case StackType.F8:
 							return ConversionKind.FloatToInt;
 						case StackType.Ref:
 						case StackType.O:
@@ -234,14 +252,42 @@ namespace ICSharpCode.Decompiler.IL
 							return ConversionKind.Invalid;
 					}
 				case PrimitiveType.R4:
+					switch (inputType) {
+						case StackType.I4:
+						case StackType.I:
+						case StackType.I8:
+							return ConversionKind.IntToFloat;
+						case StackType.F4:
+							return ConversionKind.Nop;
+						case StackType.F8:
+							return ConversionKind.FloatPrecisionChange;
+						default:
+							return ConversionKind.Invalid;
+					}
+				case PrimitiveType.R:
 				case PrimitiveType.R8:
 					switch (inputType) {
 						case StackType.I4:
 						case StackType.I:
 						case StackType.I8:
 							return ConversionKind.IntToFloat;
-						case StackType.F:
+						case StackType.F4:
 							return ConversionKind.FloatPrecisionChange;
+						case StackType.F8:
+							return ConversionKind.Nop;
+						default:
+							return ConversionKind.Invalid;
+					}
+				case PrimitiveType.Ref:
+					// There's no "conv.ref" in IL, but IL allows these conversions implicitly,
+					// whereas we represent them explicitly in the ILAst.
+					switch (inputType) {
+						case StackType.I4:
+						case StackType.I:
+						case StackType.I8:
+							return ConversionKind.StartGCTracking;
+						case StackType.O:
+							return ConversionKind.ObjectInterior;
 						default:
 							return ConversionKind.Invalid;
 					}
@@ -260,7 +306,7 @@ namespace ICSharpCode.Decompiler.IL
 
 		public override void WriteTo(ITextOutput output, ILAstWritingOptions options)
 		{
-			ILRange.WriteTo(output, options);
+			WriteILRange(output, options);
 			output.Write(OpCode);
 			if (CheckForOverflow) {
 				output.Write(".ovf");
